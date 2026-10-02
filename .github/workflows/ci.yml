@@ -1,0 +1,31 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['22.18.0', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - run: npm pack --dry-run
+      - name: Smoke test the installed package
+        shell: bash
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          package_name="$(node -p "require('./package.json').name + '-' + require('./package.json').version + '.tgz'")"
+          npm install --prefix "$RUNNER_TEMP/csm-smoke" "$RUNNER_TEMP/$package_name" --ignore-scripts
+          "$RUNNER_TEMP/csm-smoke/node_modules/.bin/csm" --version
+          "$RUNNER_TEMP/csm-smoke/node_modules/.bin/csm" --help
