@@ -23,6 +23,14 @@
 
 运行包使用 `dist` 中的 JavaScript。`npm ci` 的 `prepare` 和打包的 `prepack` 会执行构建；禁用生命周期脚本时需要自己执行 `npm run build`。源码测试使用 TypeScript，开发依赖包含编译器，但运行时没有第三方依赖。不能直接在 `node_modules` 中依赖 Node 对 `.ts` 文件的原生类型擦除。
 
+## v0.2 偏离检查试用范围
+
+偏离检查可在已安装 CLI 上按需运行，不需要真实 handoff、目标 profile、监听端口或后台服务。技能对证据的定点复核发生在当前 Codex 对话里，不代表 CLI 能自动附着所有 TUI 或理解任意原始日志。
+
+当前支持的确定性约束是明确文件存在、不存在和字节哈希不变；语义型 `manual` 要求仍需定点复核。验收需要明确注册并显式运行的命令，调用者导入的通过结果不会当作 CLI 实测。文件范围和读取量有上限，未列出的文件、外部状态和缺失语义字段可能漏检。
+
+这是用于收集实项目反馈的 advisory/shadow 试用，不是已校准偏离概率或自动换会话系统。Linux 合成回放不能替代实项目验收，也不表示 Windows、WSL 或 macOS 已验证。协议与步骤见[试用指南](drift-trial.md)。
+
 ## Profile 版本差异
 
 本机 0.159.2 的帮助将 `--profile NAME` 解释为叠加 `$CODEX_HOME/NAME.config.toml`。官方文档说明 0.134.0 起使用独立 profile 文件，旧版 `[profiles.NAME]` 不再是同一接口。请依据已安装 CLI 的帮助和 `doctor` 报告确认布局，勿把某种目录结构当成所有版本的通用事实。[官方 profile 配置说明](https://learn.chatgpt.com/docs/config-file/config-advanced)

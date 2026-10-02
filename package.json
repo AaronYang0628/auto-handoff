@@ -1,6 +1,6 @@
 {
   "name": "auto-handoff",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Private, evidence-backed handoff packets for fresh Codex CLI sessions",
   "type": "module",
   "engines": {
@@ -12,7 +12,7 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.ts",
-    "check": "node --check src/cli.ts && node --check src/handoff.ts && node --check src/launcher.ts",
+    "check": "node --check src/cli.ts && node --check src/handoff.ts && node --check src/launcher.ts && node --check src/drift.ts && node --check src/drift-store.ts && node --check src/monitor.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "prepare": "npm run build",

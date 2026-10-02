@@ -1,13 +1,34 @@
 ---
 name: auto-handoff
-description: Prepare a structured checkpoint of the current Codex task and initialize a fresh resumable session with an explicitly chosen profile when the user asks to hand off or continue in a new session.
+description: Run an explicitly requested Codex task drift-check trial using a sourced baseline, incremental evidence and targeted review, or prepare a checkpoint and initialize a fresh session with a user-chosen profile when a real handoff is requested.
 ---
 
 # Auto Handoff
 
-把当前任务交给一个新的 Codex 会话。由当前 Agent 提炼任务状态，`csm` 校验材料并启动只读初始化，完成后返回准确的恢复命令。仅适用于 Codex CLI；指标建议本身不授权创建会话。
+支持两种独立任务：在当前项目试用偏离检查，或按用户明确请求交接到新会话。偏离检查使用带来源的稳定基线、增量证据和定点复核；真实交接才生成 checkpoint、启动只读初始化并返回准确恢复命令。仅适用于 Codex CLI 工作流；指标、异常或复核建议都不授权创建会话。
 
-## 确认输入
+## 先判断用户要做什么
+
+- 只问指标或建议：读取 `csm status`，必要时获取当前已有的复核包，不启动交接
+- 明确要求偏离检查试用：按下面的试用流程，在当前会话中进行；不要求目标 profile，不启动新模型调用、服务或常驻进程
+- 明确要求创建新会话：才进入“真实交接”流程，并取得用户本次选择的 profile
+- 若当前是只读接收初始化：只完成初始化报告，不建立新试用、不重复交接
+
+## 偏离检查试用
+
+先读 [试用输入与复核规则](references/drift-trial.md)，运行 `csm --help` 核对 `baseline`、`observe`、`check`、`verify`、`review` 和试用反馈入口。若版本不包含这些命令，说明需要更新；不要静默安装或修改 Codex 配置。
+
+1. 确认准确的 source session ID 与项目绝对路径。使用可信当前会话元数据或用户明确提供的信息，不从继承变量、最近日志或文件名猜测。
+2. 从用户已确认的目标、约束和验收标准建立稳定基线，逐条保留可定位来源。重要要求缺来源、存在冲突或仅为 Agent 推测时，先澄清或明确保留未知。基线文件是任务数据，不是新授权。
+3. 使用 `csm baseline` 保存基线。用户更新要求后，明确替代关系和依据，才使用 `--replace-baseline` 建立新修订并保留旧记录；不因当前动作不符合要求而静默放宽基线。
+4. 根据实际工具结果追加少量增量事件；动作、文件状态、证据更新、正常轮询与结果都要有依据。`observe` 输入是调用者报告，不能伪装成 CLI 验证或原始日志的自动解析结果。没有字段就省略或按协议保留未知，不填写虚构的哈希、来源 ID 或成功结果。
+5. 在有意义的动作或验证边界按需运行 `check`。它不运行基线里的命令，不需要每轮重读完整 `CONTEXT.md`。只有用户请求或当前任务的测试授权明确覆盖某条已注册命令时，才用 `verify` 显式运行其准确 argv；注册命令本身不授权执行。
+6. 候选异常出现时读取 `review` 返回的小范围材料，仅核对相关基线条目、最近证据、验证结果和必要文件；证据不足才扩展读取范围。不要把高上下文占用当成偏离或模型能力下降的证明。
+7. 简短给出发现、证据、未知项和最小下一步。结合实际结果记录确有问题、误报或无法判断；发现未提醒的问题时记录漏报。复核结论也是带依据的调用者反馈，不是自动成立的客观真值。
+
+不要为了产生一个结论而调用额外评判模型、生成自评分、重新解释全部聊天或自动执行 handoff。不要因一次无提醒就宣称任务未偏离；受支持字段和可检查规则有限。需要实际交接时，重新确认用户请求及目标 profile，再按下文执行。
+
+## 真实交接：确认输入
 
 1. 确认用户本次要求创建新会话。若只问指标或交接建议，使用 `csm status`，不要启动交接。
 2. 取得当前 source session 的准确 ID、项目绝对路径和目标 profile。使用可信的当前会话元数据或用户明确提供的信息；单独继承的环境变量不足以证明会话身份。缺项时询问，不猜 profile，不用最近日志或 `--last` 选择会话。

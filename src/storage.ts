@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 export class UserError extends Error {}
 export const digest = (value: string | Buffer) => crypto.createHash('sha256').update(value).digest('hex');
 export const now = () => new Date().toISOString();
@@ -71,7 +71,7 @@ export function privateDir(dir: string): void {
 }
 export function atomicWrite(file: string, value: unknown): void {
   assertNoSymlinks(file);
-  const content = typeof value === 'string' ? value : JSON.stringify(value, null, 2) + '\n';
+  const content = Buffer.isBuffer(value) ? value : typeof value === 'string' ? value : JSON.stringify(value, null, 2) + '\n';
   const tmp = path.join(path.dirname(file), `.tmp-${crypto.randomUUID()}`);
   try {
     const fd = fs.openSync(tmp, 'wx', 0o600);

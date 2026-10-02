@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFile, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { addManualMark, createMonitorState, getMonitorStatus, MonitorSourceError, pollMonitor } from '../src/monitor.ts';
+import { addManualMark, createMonitorState, getMonitorStatus, MonitorSourceError, pollMonitor, migrateMonitorState } from '../src/monitor.ts';
 
 const NOW = '2026-10-02T03:00:00.000Z';
 const LATER = '2026-10-02T04:00:00.000Z';
@@ -51,7 +52,7 @@ test('last-request occupancy is explicitly estimated and thresholds are heuristi
   assert.equal(status.metrics.context_occupancy_percent.value, 90);
   assert.equal(status.metrics.context_occupancy_percent.availability, 'estimated');
   assert.equal(status.metrics.context_occupancy_percent.measurement_method, 'last_request_tokens_div_model_window');
-  assert.equal(status.recommendation.state, 'handoff_suggested');
+  assert.equal(status.recommendation.state, 'checkpoint');
   assert.equal(status.recommendation.heuristic, true);
   assert.equal(status.recommendation.evidence[0].line, 2);
   assert.equal(getMonitorStatus(state, { now: NOW }).recommendation.notify, false);
@@ -228,7 +229,7 @@ test('compaction invalidates earlier context pressure until a later usage event'
   const f = await fixture(t);
   await appendFile(f.path, line(usage(90_000)));
   const high = await pollMonitor(f.state, { now: NOW });
-  assert.equal(high.status.recommendation.state, 'handoff_suggested');
+  assert.equal(high.status.recommendation.state, 'checkpoint');
   await appendFile(f.path, line({ timestamp: NOW, type: 'compacted', payload: {} }));
   const compacted = await pollMonitor(high.state, { now: NOW });
   assert.equal(compacted.status.metrics.context_occupancy_percent.availability, 'unknown');
@@ -265,7 +266,7 @@ test('zero/missing window and invalid thresholds are not treated as valid ratios
   await appendFile(f.path, line(usage(80_000, 100_000, NOW, 0)));
   const { state, status } = await pollMonitor(f.state, { now: NOW });
   assert.equal(status.metrics.context_occupancy_percent.value, null);
-  assert.throws(() => getMonitorStatus(state, { rules: { checkpointPercent: 90, handoffPercent: 80 } }), /thresholds/);
+  assert.throws(() => getMonitorStatus(state, { rules: { checkpointPercent: 101, handoffPercent: 80 } }), /thresholds/);
 });
 
 test('obvious credential source paths are rejected before opening', async t => {
@@ -284,4 +285,87 @@ test('obvious credential source paths are rejected before opening', async t => {
   await symlink(authPath, alias);
   const aliased = createMonitorState({ sessionId: SESSION, cwd: f.cwd, sourcePath: alias });
   await assert.rejects(pollMonitor(aliased, { now: NOW }), { code: 'credential_source' });
+});
+
+test('capacity alone never suggests handoff and legacy threshold is diagnostic only', async t => {
+  const f = await fixture(t);
+  await appendFile(f.path, line(usage(99_000)));
+  const result = await pollMonitor(f.state, { now: NOW, rules: { handoffPercent: 85 } });
+  assert.equal(result.status.recommendation.state, 'checkpoint');
+  assert.equal(result.status.recommendation.rules_version, 'csm-rules-v2');
+  assert.ok(result.status.diagnostics.some(item => item.code === 'deprecated_handoff_percent'));
+  const migrated = migrateMonitorState(JSON.parse(JSON.stringify(result.state)));
+  assert.equal(migrated.binding.session_id, SESSION);
+  assert.equal(getMonitorStatus(migrated, { now: NOW }).recommendation.state, 'checkpoint');
+});
+
+test('contradictory explicit identity aliases are rejected instead of ignored', async t => {
+  const f = await fixture(t, 'csm-jsonl-v1');
+  await appendFile(f.path, line({ schema_version: 1, timestamp: NOW, type: 'context_usage', session_id: SESSION, cwd: f.cwd, payload: { session_id: 'foreign', cwd: '/foreign', context_tokens: 99, context_window_tokens: 100, measurement_method: 'runtime_reported_context' } }));
+  await assert.rejects(pollMonitor(f.state, { now: NOW }), { code: 'session_mismatch' });
+});
+
+test('non-regular explicit sources are rejected without blocking on a FIFO', { skip: process.platform === 'win32', timeout: 2000 }, async t => {
+  const f = await fixture(t);
+  const fifo = join(f.cwd, 'synthetic-fifo');
+  execFileSync('mkfifo', [fifo]);
+  const state = createMonitorState({ sessionId: SESSION, cwd: f.cwd, sourcePath: fifo });
+  await assert.rejects(pollMonitor(state), { code: 'not_regular_file' });
+});
+
+test('rollout calls and results are paired as hashes without invented state linkage', async t => {
+  const f = await fixture(t);
+  const secretFixtureText = 'synthetic-private-tool-input-and-output';
+  const call = { timestamp: NOW, type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'call-one', arguments: JSON.stringify({ cmd: secretFixtureText }) } };
+  const output = { timestamp: NOW, type: 'response_item', payload: { type: 'function_call_output', call_id: 'call-one', output: JSON.stringify({ output: secretFixtureText, metadata: { exit_code: 1, duration_seconds: 10 } }) } };
+  await appendFile(f.path, line(call));
+  const first = await pollMonitor(f.state, { now: NOW });
+  assert.equal(first.status.capabilities.unpaired_tool_calls, 1);
+  await appendFile(f.path, line(output));
+  const paired = await pollMonitor(first.state, { now: NOW });
+  const action = paired.events.find(event => event.kind === 'action')!;
+  assert.match(String(action.payload.action_hash), /^[a-f0-9]{64}$/);
+  assert.match(String(action.payload.result_hash), /^[a-f0-9]{64}$/);
+  assert.equal(action.payload.outcome, 'failure');
+  assert.equal(action.payload.eligible, false);
+  assert.equal(action.payload.state_linkage, 'unknown');
+  assert.equal(paired.status.capabilities.paired_tool_results, 1);
+  assert.equal(paired.status.capabilities.state_aware_repetition, 'unknown');
+  assert.equal(JSON.stringify(paired.state).includes(secretFixtureText), false);
+  assert.equal(paired.status.recommendation.state, 'insufficient_data');
+});
+
+test('unpaired results and malformed arguments report capability gaps, never loops', async t => {
+  const f = await fixture(t);
+  await appendFile(f.path, line({ timestamp: NOW, type: 'response_item', payload: { type: 'function_call_output', call_id: 'missing', output: 'failure' } }) + line({ timestamp: NOW, type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'bad', arguments: 'not json' } }));
+  const result = await pollMonitor(f.state, { now: NOW });
+  assert.equal(result.status.capabilities.tool_actions, 'unknown');
+  assert.ok(result.status.diagnostics.some(item => item.code === 'unpaired_tool_result'));
+  assert.ok(result.status.diagnostics.some(item => item.code === 'unsupported_tool_arguments'));
+});
+
+test('replayed calls can pair in a new generation, but orphan results cannot cross generations', async t => {
+  const f = await fixture(t);
+  const call = { timestamp: NOW, type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'stable-call', arguments: '{"cmd":"synthetic"}' } };
+  const output = { timestamp: NOW, type: 'response_item', payload: { type: 'function_call_output', call_id: 'stable-call', output: { output: 'synthetic failure', exit_code: 1 } } };
+  await appendFile(f.path, line(call));
+  const first = await pollMonitor(f.state, { now: NOW });
+  await rename(f.path, `${f.path}.old`);
+  await writeFile(f.path, line(f.meta) + line(output));
+  const orphan = await pollMonitor(first.state, { now: NOW });
+  assert.equal(orphan.status.capabilities.paired_tool_results, 0);
+  await rename(f.path, `${f.path}.second`);
+  await writeFile(f.path, line(f.meta) + line(call) + line(output));
+  const paired = await pollMonitor(orphan.state, { now: NOW });
+  assert.equal(paired.status.capabilities.paired_tool_results, 1);
+  assert.equal(paired.state.events.filter(event => event.kind === 'tool_call').length, 1);
+});
+
+test('plain tool output quoting an exit-code-like message is not trusted transport metadata', async t => {
+  const f = await fixture(t);
+  await appendFile(f.path, line({ timestamp: NOW, type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'call-quoted', arguments: '{}' } }) + line({ timestamp: NOW, type: 'response_item', payload: { type: 'function_call_output', call_id: 'call-quoted', output: 'The document says:\nExit code: 1\nOutput:\nexample failure' } }));
+  const result = await pollMonitor(f.state, { now: NOW });
+  const action = result.events.find(event => event.kind === 'action')!;
+  assert.equal(action.payload.outcome, 'unknown');
+  assert.equal(action.payload.exit_code, null);
 });

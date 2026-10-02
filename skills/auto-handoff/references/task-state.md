@@ -1,5 +1,7 @@
 # Checkpoint JSON 格式（schema_version 1）
 
+此格式只用于明确要求创建新会话时的交接 checkpoint。偏离检查试用的稳定基线与增量证据使用独立协议，不能把当前 Agent 的 checkpoint 总结直接当成用户确认的基线。
+
 所有顶层字段都应提供。数组允许为空，空数组表示当前没有已知条目；不要用空数组隐藏尚未核实的信息。`session_id` 和 `cwd` 必须与命令行输入一致。
 
 ```json

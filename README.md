@@ -12,7 +12,7 @@
 
 旧会话和未提交改动保留。你决定何时交接、用哪个 profile，以及何时继续写代码。
 
-> **当前状态：早期版本，面向 Codex CLI。** 2026-10-02 验证：Linux 上 Node.js 22.18.0 / 24.19.0 的 67 项核心测试及 9 项页面测试通过（共 76 项）；Codex CLI 0.159.2 的命令帮助接口已核对。真实账号的创建、模型初始化和交互恢复尚未完成端到端验证；macOS、Windows 原生和 WSL 也未验证。详见[兼容性](docs/compatibility.md)和[验证记录](docs/verification.md)。
+> **当前状态：早期版本，面向 Codex CLI。** 2026-10-02 的 v0.1 发布快照：Linux 上 Node.js 22.18.0 / 24.19.0 的 67 项核心测试及 9 项页面测试通过（共 76 项）；Codex CLI 0.159.2 的命令帮助接口已核对。真实账号的创建、模型初始化和交互恢复尚未完成端到端验证；macOS、Windows 原生和 WSL 也未验证。详见[兼容性](docs/compatibility.md)和[验证记录](docs/verification.md)。
 
 ## 让你的 Codex 帮你安装
 
@@ -32,7 +32,7 @@
 
 - Node.js **22.18+** 和 npm
 - Git
-- 已安装的 Codex CLI，以及你自己配置、确认可用的 profile
+- 已安装的 Codex CLI；只有执行真实交接时，才需要你自己选定并确认可用的 profile
 
 在终端运行：
 
@@ -55,6 +55,49 @@ csm doctor
 重启 Codex 后，通过 `/skills` 检查是否能找到 `auto-handoff`。运行技能的环境也必须能通过 PATH 找到 `csm`。全局 npm 目录不可写时，使用适合自己的可写 npm 前缀，不必通过管理员权限强行安装。
 
 只想安装到一个项目？使用 `csm install --scope project --cwd "/path/to/project"`。安装器遇到已有的非托管技能或修改过的托管文件会停止，避免覆盖它们。
+
+## 已安装？更新 CLI 和技能
+
+在原来的源码目录里更新，先确认 `git status --short` 中没有需要保留或处理的本地改动，再执行：
+
+```bash
+git pull --ff-only
+npm ci
+npm link
+csm uninstall --scope user
+csm install --scope user
+csm doctor
+```
+
+新版本的技能内容有变化时，安装器不会直接覆盖旧包，所以需要先卸载旧的托管技能再安装。**若卸载结果的 `preserved` 非空，请先核对和备份自己修改的文件，停止安装并手动合并；不要删除它们来绕过保护。** 项目级安装使用对应的 `--scope project --cwd "/path/to/project"`；使用旧别名时在卸载和安装都加上 `--legacy-alias`。
+
+保留现有源码路径，重新启动 Codex，再检查 `/skills`。升级不会删除运行状态、修改 profile、启动监测或执行真实交接。
+
+## 在真实项目中试用偏离检查
+
+在你正在开发的 Codex 对话中输入：
+
+```text
+$auto-handoff 在当前项目开启偏离检查试用。先从我已确认的目标、约束和验收标准建立带来源的稳定基线，向我确认缺少的信息；之后只记录有依据的增量动作和验证结果，出现异常再定点核对。不要自行改写基线，不要自动创建新会话。
+```
+
+这条入口与交接是两件事：**试用偏离检查不要求创建新会话，也不要求反复重读整份 CONTEXT.md。**
+
+- 基线保留用户确认的要求及其来源；后续要求改变时明确更新，不让当前 Agent 的总结静默覆盖它
+- 低成本规则检查有证据的无进展重复、可确定检查的约束，以及缺失或过期的验证；未采集到的字段保留 `unknown`
+- 只在出现候选异常时，让当前技能消费小范围复核材料，并查看对应约束、近期证据和相关文件
+- 上下文占用只是容量背景或 checkpoint 时机，不再单独给出 `handoff_suggested`，也不判断模型“变笨”
+- CLI 不调用额外的评判模型，也不生成自评分；当前 Codex 对话中的复核仍使用现有模型，按该环境正常计入用量
+
+具体来源绑定、实际支持的证据字段、复核与试用反馈见[项目试用指南](docs/drift-trial.md)。建议先选一个范围小、验收清楚的真实任务，记录正确提醒、误报、无法判断和漏报；合成测试不能证明真实项目里的提醒准确率。
+
+也可以先在仓库里运行一个不读真实项目、不调用模型的合成演示：
+
+```bash
+node docs/drift-demo.mjs
+```
+
+它故意重复三次相同失败检查，生成 `no-gain-loop` 候选并记录一次“有意重试”的误报反馈；修改合成文件后，实测验证通过，候选消失。材料保留在输出的临时目录，不代表真实项目的检测效果。
 
 ## 在 Codex 中使用
 
@@ -180,7 +223,7 @@ npm test
 
 源码为 TypeScript，安装包运行编译后的 JavaScript，无运行时第三方依赖。测试使用隔离临时目录、合成事件和模拟 Codex 入口，不需要模型账号，也不能代替真实创建与恢复的验证。
 
-文档导航：[兼容性](docs/compatibility.md) · [验证记录](docs/verification.md) · [监测说明](docs/monitoring.md) · [数据与恢复](docs/safety.md) · [技能说明](skills/auto-handoff/SKILL.md) · [checkpoint 格式](skills/auto-handoff/references/task-state.md) · [项目页发布](docs/publishing.md)
+文档导航：[项目试用](docs/drift-trial.md) · [基线/证据协议](skills/auto-handoff/references/drift-trial.md) · [兼容性](docs/compatibility.md) · [验证记录](docs/verification.md) · [监测说明](docs/monitoring.md) · [数据与恢复](docs/safety.md) · [技能说明](skills/auto-handoff/SKILL.md) · [checkpoint 格式](skills/auto-handoff/references/task-state.md) · [项目页发布](docs/publishing.md)
 
 ## 卸载
 

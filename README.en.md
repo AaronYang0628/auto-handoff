@@ -12,7 +12,7 @@ Current task → checkpoint → read-only initialization → resume the exact ne
 
 Your old session and uncommitted changes stay in place. You choose when to hand off, which profile to use, and when to resume development.
 
-> **Status: early version, focused on Codex CLI.** Verification snapshot, 2026-10-02: 67 core tests and 9 website tests passed (76 total) on Linux with Node.js 22.18.0 and 24.19.0. The command-help interfaces of Codex CLI 0.159.2 were checked. Authenticated session creation, model initialization, and interactive resume have not been verified end to end. macOS, native Windows, and WSL are also unverified. See [compatibility](docs/compatibility.md) and the [verification record](docs/verification.md) (Chinese).
+> **Status: early version, focused on Codex CLI.** v0.1 verification snapshot, 2026-10-02: 67 core tests and 9 website tests passed (76 total) on Linux with Node.js 22.18.0 and 24.19.0. The command-help interfaces of Codex CLI 0.159.2 were checked. Authenticated session creation, model initialization, and interactive resume have not been verified end to end. macOS, native Windows, and WSL are also unverified. See [compatibility](docs/compatibility.md) and the [verification record](docs/verification.md) (Chinese).
 
 ## Let your Codex install it
 
@@ -32,7 +32,7 @@ You need:
 
 - Node.js **22.18+** and npm
 - Git
-- Codex CLI, with a profile you have configured and confirmed works
+- Codex CLI; a real handoff additionally needs a profile you explicitly choose and have confirmed works
 
 Run in your terminal:
 
@@ -55,6 +55,49 @@ csm doctor
 Restart Codex, then check `/skills` for `auto-handoff`. The environment running the skill must also find `csm` on PATH. If npm's global directory is not writable, use a writable prefix appropriate for your Node installation rather than forcing an administrator-level install.
 
 For a single project, use `csm install --scope project --cwd "/path/to/project"`. The installer stops if it finds an unmanaged skill or modified managed files instead of overwriting them.
+
+## Already installed? Update the CLI and skill
+
+Use the original checkout. First inspect `git status --short` and preserve or resolve any local changes, then run:
+
+```bash
+git pull --ff-only
+npm ci
+npm link
+csm uninstall --scope user
+csm install --scope user
+csm doctor
+```
+
+When the bundled skill changes, the installer refuses to overwrite the older bundle, so remove the managed skill before reinstalling. **If uninstall returns a nonempty `preserved` list, stop, inspect and back up your edits, and merge them manually before continuing. Do not delete them to bypass the protection.** For project installs, use `--scope project --cwd "/path/to/project"`; include `--legacy-alias` on both commands if you installed that alias.
+
+Keep the checkout at its existing path. Restart Codex and check `/skills`. Updating does not delete runtime state, change your profile, start monitoring, or perform a real handoff.
+
+## Try drift checks in a real project
+
+In the Codex conversation where you are developing your project, enter:
+
+```text
+$auto-handoff Start a drift-check trial for this project. Build a stable, sourced baseline from my confirmed goal, constraints, and acceptance criteria; ask me about missing information. Then record only evidence-backed incremental actions and verification results, and review relevant details when an anomaly appears. Do not silently rewrite the baseline or create a new session automatically.
+```
+
+**A drift-check trial does not require a fresh session or constant rereading of an entire CONTEXT.md.**
+
+- Keep user-confirmed requirements and their sources in the baseline; revise it explicitly when the requirements change, rather than silently replacing it with the current agent's summary
+- Cheap rules check evidenced no-progress repetition, deterministically checkable constraints, and missing or stale verification; unavailable fields remain `unknown`
+- Only a candidate anomaly calls for a small review packet: the relevant constraint, recent evidence, and related files
+- Context occupancy is capacity background or a checkpoint opportunity. It no longer produces `handoff_suggested` on its own or establishes declining model quality
+- The CLI makes no additional judging-model calls and emits no self-score. Review in your existing Codex conversation still uses that model and its normal usage
+
+See the [project trial guide](docs/drift-trial.md) (Chinese) for explicit source binding, supported evidence fields, targeted review, and feedback. Start with a small real task with clear acceptance criteria, and record useful alerts, false positives, uncertain cases, and missed anomalies. Synthetic tests do not establish real-project detection accuracy.
+
+For a synthetic demonstration that reads no real project and calls no model, run this from the checkout:
+
+```bash
+node docs/drift-demo.mjs
+```
+
+It deliberately repeats the same failing check three times, produces a `no-gain-loop` candidate, and records false-positive feedback because these retries were intentional. After the intended fixture change, measured verification passes and the candidate clears. Temporary files are retained for inspection; this is not a real-project accuracy result.
 
 ## Use it in Codex
 

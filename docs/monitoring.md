@@ -1,6 +1,8 @@
 # 监测与建议
 
-监测不会创建新会话。`watch` 只读取明确指定的文件，`status` 展示已经保存的观测；没有输入来源时仍可手动 checkpoint / handoff。
+v0.2 将容量监测与偏离检查分开。需要稳定基线、状态相连的动作、明确验收和试用反馈时，从[项目试用指南](drift-trial.md)开始。普通 rollout 日志不会自动提供完整语义证据。
+
+监测不会创建新会话。`watch` 读取显式绑定的日志；如果已建立偏离试用基线，还会核对其中明确列出的相关文件，并在输出的 `drift` 字段附上报告。`status` 展示已经保存的观测，不自行刷新文件。没有日志来源时仍可用 `check` / `review` 试用文件与验收检查，也可手动 checkpoint / handoff。
 
 ## 使用明确来源
 
@@ -47,8 +49,7 @@ rollout 中“上次请求 token / 模型窗口”只标为 `estimated`，表示
 | 信号 | 建议 |
 | --- | --- |
 | 可用/估算占用 <70% | `continue` |
-| 可用/估算占用 ≥70%、<85% | `checkpoint`，准备材料 |
-| 可用/估算占用 ≥85% | `handoff_suggested`，由用户选择阶段边界 |
+| 可用/估算占用 ≥70%（包括 ≥85%） | `checkpoint`，仅表示容量准备时机，不推断任务偏离 |
 | 新鲜的约束失守/重复人工标记 | `review` |
 | 连续 3 次等价动作，且声明的文件状态、证据和结果不变 | 重复候选，`review`；不自动判定语义失败 |
 | 阶段完成标记 | 可作为 checkpoint 时机，不代表质量下降 |
@@ -57,17 +58,18 @@ rollout 中“上次请求 token / 模型窗口”只标为 `estimated`，表示
 
 新代码/文件快照、新证据、预期轮询或不同结果会打断重复候选。普通原始工具调用缺少这些语义字段时，不假装有可靠的重复检测。
 
+当前容量监测规则版本为 `csm-rules-v2`；上下文占用不会单独产生 `handoff_suggested`。偏离试用报告使用独立的 `csm-drift-v1`，其 `review`、`insufficient_data`、`continue` 不等于交接授权。
+
 默认新鲜度窗口 15 分钟、提醒冷却 5 分钟，重复建议会去重。监测命令可通过以下参数调整，参数只对本次调用生效，不会改 Codex 配置：
 
 ```text
 --checkpoint-percent 70
---handoff-percent 85
 --repetition-count 3
 --cooldown-seconds 300
 --stale-after-seconds 900
 ```
 
-checkpoint 阈值必须低于 handoff 阈值，handoff 阈值不超过 100；重复次数至少为 2。需要保持自定义规则时，在 `watch`、`status` 和 `mark` 调用中使用同一组参数。规则是启发式，不提供退化概率或健康总分。
+`--checkpoint-percent` 不超过 100，重复次数至少为 2。旧 `--handoff-percent` 仍接受 0–100 的值供兼容，但已废弃，仅报告诊断，不影响建议或触发交接。需要保持自定义规则时，在 `watch`、`status` 和 `mark` 调用中使用同一组参数。规则是启发式，不提供退化概率或健康总分。
 
 ## 手动标记与反馈
 
@@ -79,7 +81,7 @@ csm feedback --session SOURCE_ID --cwd "/path/to/project" \
   --operation-id OPERATION_ID --outcome helped --note "关键约束恢复，下一步明确"
 ```
 
-`mark` 类型还包括 `repetition`；约束失守必须关联 constraint ID。`feedback` 的 outcome 可为 `helped`、`unhelpful`、`unknown`，并绑定已经记录的交接 operation。笔记保存在本地，避免填写密钥或无关个人资料。
+`mark` 类型还包括 `repetition`；约束失守必须关联 constraint ID。`feedback` 的 outcome 可为 `helped`、`unhelpful`、`unknown`，并绑定已经记录的交接 operation。这是交接效果反馈；偏离试用使用另一组 `--signal-id` / `--verdict true|false|uncertain` 或 `--verdict missed` 参数，详见[试用指南](drift-trial.md#记录试用结果)。笔记保存在本地，避免填写密钥或无关个人资料。
 
 ## 有界保留
 

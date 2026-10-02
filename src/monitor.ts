@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 
@@ -25,7 +26,7 @@ export interface NormalizedEvent {
   turn_id: string | null;
   workspace: string;
   source: Evidence;
-  kind: 'source_identity' | 'context_usage' | 'compaction' | 'action' | 'manual_mark' | 'model';
+  kind: 'source_identity' | 'context_usage' | 'compaction' | 'action' | 'manual_mark' | 'model' | 'tool_call' | 'evidence_boundary';
   payload: Record<string, unknown>;
 }
 export interface Metric<T = number> {
@@ -69,7 +70,7 @@ export interface MonitorStatus {
   };
   recommendation: {
     state: RecommendationState;
-    rules_version: 'csm-rules-v1';
+    rules_version: 'csm-rules-v2';
     heuristic: true;
     reasons: string[];
     evidence: Evidence[];
@@ -77,6 +78,7 @@ export interface MonitorStatus {
     notify: boolean;
     suppressed_reason: string | null;
   };
+  capabilities: { tool_actions: 'observed' | 'unknown'; state_aware_repetition: 'reported' | 'unknown'; paired_tool_results: number; unpaired_tool_calls: number; reason: string };
   diagnostics: { code: string; message: string; line?: number }[];
   limitations: string[];
 }
@@ -168,6 +170,60 @@ export function createMonitorState(input: { sessionId: string; cwd: string; sour
   };
 }
 
+/** v0.1 state remains readable; the event schema is unchanged, and new kinds are additive. */
+export function migrateMonitorState(input: unknown): MonitorState {
+  const value = object(input);
+  if (!value || value.schema_version !== 1 || !object(value.binding) || !object(value.cursor) || !Array.isArray(value.events) || !Array.isArray(value.seen_event_ids)) throw new Error('Unsupported or malformed monitor state');
+  const checked = createMonitorState({ sessionId: value.binding.session_id, cwd: value.binding.workspace, sourcePath: value.binding.source_path ?? undefined, adapter: value.binding.adapter });
+  const state = structuredClone(value) as MonitorState;
+  state.cursor = { ...checked.cursor, ...state.cursor };
+  state.diagnostics ??= [];
+  state.last_notice ??= null;
+  state.last_poll_at ??= null;
+  return state;
+}
+
+function normalizeToolRecord(state: MonitorState, raw: Record<string, any>, evidence: Evidence, now: string): NormalizedEvent | null {
+  const item = object(raw.payload)!;
+  const callId = string(item.call_id) ? hash(item.call_id) : null;
+  if (!callId) { diagnostic(state, 'unpaired_tool_record', 'Tool record lacks a supported call ID; action semantics stay unknown', evidence.line ?? undefined); return null; }
+  if (item.type === 'function_call') {
+    if (!string(item.name) || !/^[a-zA-Z0-9_.:-]{1,200}$/.test(item.name)) { diagnostic(state, 'unsupported_tool_call', 'Tool call has no supported tool name'); return null; }
+    let args: unknown;
+    try { args = typeof item.arguments === 'string' ? JSON.parse(item.arguments) : item.arguments; }
+    catch { diagnostic(state, 'unsupported_tool_arguments', 'Tool arguments were not supported JSON; raw arguments were not retained'); return null; }
+    if (!object(args) && !Array.isArray(args)) { diagnostic(state, 'unsupported_tool_arguments', 'Tool arguments require a JSON object or array'); return null; }
+    const actionHash = hash(canonical({ tool: item.name, arguments: args }));
+    const old = state.events.findLast(event => event.kind === 'tool_call' && event.payload.call_id_hash === callId);
+    if (old && old.payload.action_hash !== actionHash) { diagnostic(state, 'conflicting_tool_call', 'A call ID was reused with different arguments; action observation was rejected'); return null; }
+    return eventFor(state, { ...raw, event_id: `tool-call:${callId}` }, evidence, now, 'tool_call', { tool: item.name, call_id_hash: callId, action_hash: actionHash, arguments_format: 'json', state_linkage: 'unknown' });
+  }
+  const call = state.events.findLast(event => event.kind === 'tool_call' && event.payload.call_id_hash === callId && event.source.generation === evidence.generation);
+  if (!call) { diagnostic(state, 'unpaired_tool_result', 'No same-generation observed call matches this result; its semantics stay unknown', evidence.line ?? undefined); return null; }
+  if (item.output === undefined) { diagnostic(state, 'unsupported_tool_result', 'Tool result has no supported output field'); return null; }
+  let result: unknown = item.output;
+  let code: number | null = null;
+  if (typeof result === 'string') {
+    try { result = JSON.parse(result); } catch { /* Plain text is hashed below without persistence. */ }
+  }
+  const resultObject = object(result);
+  if (resultObject) {
+    const candidate = resultObject.exit_code ?? object(resultObject.metadata)?.exit_code;
+    if (Number.isInteger(candidate)) code = candidate;
+    // Omit volatile transport metadata, but never infer result meaning from stdout words.
+    if (resultObject.output !== undefined) result = { output: resultObject.output, exit_code: code };
+  } else if (typeof result === 'string') {
+    const wrapper = /(?:^|\n)(?:Process exited with code|Exit code:)\s*(-?\d+)\s*\n(?:Final output:|Output:)\s*\n([\s\S]*)$/.exec(result);
+    if (wrapper && /^(?:Chunk ID:|Wall time:)/.test(result)) { code = Number(wrapper[1]); result = { output: wrapper[2], exit_code: code }; }
+  }
+  const resultHash = hash(canonical(result));
+  return eventFor(state, { ...raw, event_id: `tool-result:${callId}:${resultHash}` }, evidence, now, 'action', {
+    tool: call.payload.tool, call_id_hash: callId, call_event_id: call.event_id, action_hash: call.payload.action_hash, result_hash: resultHash,
+    outcome: code === null ? 'unknown' : code === 0 ? 'success' : 'failure', exit_code: code, observed_tool: true,
+    eligible: false, signature: null, file_snapshot: null, state_linkage: 'unknown', expected_polling: null, new_evidence: null,
+  });
+}
+
 function assertIdentity(state: MonitorState, session: unknown, cwd: unknown, required = false) {
   if (required && (!string(session) || !string(cwd))) throw new MonitorSourceError('missing_identity', 'Source metadata must contain both session ID and absolute cwd');
   if (session !== undefined && session !== state.binding.session_id) throw new MonitorSourceError('session_mismatch', 'Source session ID does not match the explicitly bound session');
@@ -192,12 +248,16 @@ function normalize(state: MonitorState, raw: Record<string, any>, evidence: Evid
   const session = metadata && adapter === 'codex-rollout-v1-partial' ? payload.id : raw.session_id ?? payload.session_id;
   const cwd = metadata && adapter === 'codex-rollout-v1-partial' ? payload.cwd : raw.cwd ?? raw.workspace ?? payload.cwd;
   assertIdentity(state, session, cwd, metadata);
+  for (const explicitSession of [raw.session_id, payload.session_id]) if (explicitSession !== undefined) assertIdentity(state, explicitSession, undefined);
+  for (const explicitCwd of [raw.cwd, raw.workspace, payload.cwd, payload.workspace]) if (explicitCwd !== undefined) assertIdentity(state, undefined, explicitCwd);
   if (metadata) {
     state.identity_verified = true;
     return eventFor(state, raw, evidence, now, 'source_identity', { session_id: session, workspace: resolve(cwd) });
   }
   if (!state.identity_verified) throw new MonitorSourceError('missing_identity', 'Read-only source must begin with matching session_meta before event records');
   if (adapter === 'codex-rollout-v1-partial') {
+    if (raw.type === 'response_item' && ['function_call', 'function_call_output'].includes(payload.type)) return normalizeToolRecord(state, raw, evidence, now);
+    if ((raw.type === 'response_item' && payload.type === 'message' && payload.role === 'user') || (raw.type === 'event_msg' && payload.type === 'user_message')) return eventFor(state, raw, evidence, now, 'evidence_boundary', { boundary: 'user_message', content_retained: false });
     if (raw.type === 'event_msg' && payload.type === 'token_count') {
       const info = object(payload.info) ?? {};
       const last = object(info.last_token_usage) ?? {};
@@ -250,7 +310,15 @@ function normalize(state: MonitorState, raw: Record<string, any>, evidence: Evid
 }
 
 function appendEvent(state: MonitorState, event: NormalizedEvent): boolean {
-  if (state.seen_event_ids.includes(event.event_id)) return false;
+  if (state.seen_event_ids.includes(event.event_id)) {
+    // A replayed call was explicitly seen in this source generation. Refresh its
+    // pairing evidence without counting it twice; an orphan output does not do this.
+    if (event.kind === 'tool_call') {
+      const index = state.events.findIndex(previous => previous.event_id === event.event_id && previous.kind === 'tool_call' && previous.payload.action_hash === event.payload.action_hash);
+      if (index >= 0) state.events[index] = event;
+    }
+    return false;
+  }
   state.seen_event_ids.push(event.event_id);
   state.seen_event_ids = state.seen_event_ids.slice(-MAX_SEEN);
   state.events.push(event);
@@ -260,13 +328,13 @@ function appendEvent(state: MonitorState, event: NormalizedEvent): boolean {
 
 /** Reads only the explicitly supplied file. No filesystem discovery and no writes to source. */
 export async function pollMonitor(input: MonitorState, options: MonitorOptions = {}): Promise<{ state: MonitorState; events: NormalizedEvent[]; status: MonitorStatus }> {
-  const state: MonitorState = structuredClone(input);
+  const state: MonitorState = migrateMonitorState(input);
   const now = nowOf(options);
   const events: NormalizedEvent[] = [];
   if (!state.binding.source_path) return finishPoll(state, events, now, options);
   assertSafeSourcePath(state.binding.source_path);
   assertSafeSourcePath(await realpath(state.binding.source_path));
-  const handle = await open(state.binding.source_path, 'r');
+  const handle = await open(state.binding.source_path, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
   try {
     const stat = await handle.stat();
     if (!stat.isFile()) throw new MonitorSourceError('not_regular_file', 'Monitoring source must be an explicitly selected regular file');
@@ -342,7 +410,7 @@ function finishPoll(state: MonitorState, events: NormalizedEvent[], now: string,
 export function addManualMark(input: MonitorState, mark: ManualMark, options: MonitorOptions = {}): { state: MonitorState; event: NormalizedEvent; status: MonitorStatus } {
   if (!['constraint-violation', 'repetition', 'phase-complete'].includes(mark.kind)) throw new Error('Unknown manual mark kind');
   if (mark.kind === 'constraint-violation' && !string(mark.constraintId)) throw new Error('Constraint violation requires constraintId');
-  const state: MonitorState = structuredClone(input);
+  const state: MonitorState = migrateMonitorState(input);
   const now = nowOf(options);
   const at = time(mark.at ?? now);
   if (!at) throw new Error('Manual mark requires a valid observation time');
@@ -366,7 +434,8 @@ function metric<T>(value: T | null, unit: string, event: NormalizedEvent | undef
   return { value, unit, observed_at: event.recorded_at, source: event.source, measurement_method: method, availability: age > staleAfterMs ? 'stale' : availability, missing_reason: age > staleAfterMs ? 'Last observation is older than the configured freshness window' : null };
 }
 
-export function getMonitorStatus(state: MonitorState, options: MonitorOptions = {}): MonitorStatus {
+export function getMonitorStatus(input: MonitorState, options: MonitorOptions = {}): MonitorStatus {
+  const state = migrateMonitorState(input);
   const now = nowOf(options);
   const staleAfterMs = options.staleAfterMs ?? 15 * 60_000;
   if (!Number.isFinite(staleAfterMs) || staleAfterMs < 0) throw new Error('staleAfterMs must be a nonnegative finite number');
@@ -374,7 +443,7 @@ export function getMonitorStatus(state: MonitorState, options: MonitorOptions = 
   const handoff = options.rules?.handoffPercent ?? 85;
   const repetitions = options.rules?.repetitionCount ?? 3;
   const cooldown = options.rules?.cooldownMs ?? 5 * 60_000;
-  if (!finite(checkpoint) || !finite(handoff) || checkpoint >= handoff || handoff > 100 || !Number.isInteger(repetitions) || repetitions < 2 || !finite(cooldown)) throw new Error('Invalid monitor rule thresholds');
+  if (!finite(checkpoint) || !finite(handoff) || checkpoint > 100 || handoff > 100 || !Number.isInteger(repetitions) || repetitions < 2 || !finite(cooldown)) throw new Error('Invalid monitor rule thresholds');
   const last = (kind: NormalizedEvent['kind']) => state.events.findLast(event => event.kind === kind);
   const usage = state.identity_verified ? last('context_usage') : undefined;
   const payload = usage?.payload ?? {};
@@ -415,6 +484,8 @@ export function getMonitorStatus(state: MonitorState, options: MonitorOptions = 
     for (let index = actions.length - 1; index >= 0; index--) {
       const action = actions[index];
       if (!action.payload.eligible || action.payload.signature !== lastAction.payload.signature) break;
+      const after = state.events.slice(state.events.indexOf(action) + 1, state.events.indexOf(lastAction));
+      if (after.some(event => event.kind === 'evidence_boundary' || (event.kind === 'manual_mark' && event.payload.kind === 'phase-complete'))) break;
       repeated.unshift(action);
     }
   }
@@ -428,8 +499,8 @@ export function getMonitorStatus(state: MonitorState, options: MonitorOptions = 
     if (repeated.length >= repetitions) { reasons.push(`${repeated.length} equivalent actions with unchanged declared file/evidence state form a repetition candidate; no semantic failure is inferred`); evidence.push(...repeated.map(event => event.source)); }
   } else if (occupancy.value !== null && ['available', 'estimated'].includes(occupancy.availability)) {
     const label = occupancy.availability === 'estimated' ? 'Estimated last-request context occupancy' : 'Last reported context occupancy';
-    recommendation = occupancy.value >= handoff ? 'handoff_suggested' : occupancy.value >= checkpoint || phase ? 'checkpoint' : 'continue';
-    reasons.push(`${label} is ${occupancy.value.toFixed(1)}%; ${checkpoint}%/${handoff}% thresholds are configurable heuristics`);
+    recommendation = occupancy.value >= checkpoint || phase ? 'checkpoint' : 'continue';
+    reasons.push(`${label} is ${occupancy.value.toFixed(1)}%; ${checkpoint}% is a preparation heuristic, and capacity alone never recommends handoff`);
     if (occupancy.source) evidence.push(occupancy.source);
   } else if (phase) {
     recommendation = 'checkpoint';
@@ -447,7 +518,7 @@ export function getMonitorStatus(state: MonitorState, options: MonitorOptions = 
     evidence.push(phase.source);
   }
   // Evidence for the decision is returned, but tiny metric changes do not cause new alerts.
-  const fingerprint = hash(canonical({ recommendation, rule: 'csm-rules-v1', checkpoint, handoff, manual: marks.map(event => event.event_id), repetition: repeated.length >= repetitions ? lastAction?.payload.signature : null, compaction: compaction && supersededByCompaction && fresh(compaction) ? compaction.event_id : null }));
+  const fingerprint = hash(canonical({ recommendation, rule: 'csm-rules-v2', checkpoint, manual: marks.map(event => event.event_id), repetition: repeated.length >= repetitions ? lastAction?.payload.signature : null, compaction: compaction && supersededByCompaction && fresh(compaction) ? compaction.event_id : null }));
   const same = state.last_notice?.fingerprint === fingerprint;
   const cooling = state.last_notice !== null && Date.parse(now) - Date.parse(state.last_notice.at) < cooldown;
   const actionable = ['checkpoint', 'review', 'handoff_suggested'].includes(recommendation);
@@ -455,8 +526,9 @@ export function getMonitorStatus(state: MonitorState, options: MonitorOptions = 
     schema_version: 1, session_id: state.binding.session_id, workspace: state.binding.workspace,
     source_path: state.binding.source_path, adapter: state.binding.adapter, source_verified: state.identity_verified,
     last_poll_at: state.last_poll_at, pending_bytes: state.cursor.pending_bytes, metrics,
-    recommendation: { state: recommendation, rules_version: 'csm-rules-v1', heuristic: true, reasons, evidence, fingerprint, notify: actionable && !same && !cooling, suppressed_reason: same ? 'duplicate_recommendation' : cooling && actionable ? 'cooldown' : !actionable ? 'not_actionable' : null },
-    diagnostics: [...state.diagnostics],
+    recommendation: { state: recommendation, rules_version: 'csm-rules-v2', heuristic: true, reasons, evidence, fingerprint, notify: actionable && !same && !cooling, suppressed_reason: same ? 'duplicate_recommendation' : cooling && actionable ? 'cooldown' : !actionable ? 'not_actionable' : null },
+    capabilities: { tool_actions: state.events.some(event => event.kind === 'action' && event.payload.observed_tool === true) ? 'observed' : 'unknown', state_aware_repetition: state.events.some(event => event.kind === 'action' && event.payload.eligible === true) ? 'reported' : 'unknown', paired_tool_results: state.events.filter(event => event.kind === 'action' && event.payload.observed_tool === true).length, unpaired_tool_calls: state.events.filter(event => event.kind === 'tool_call' && !state.events.some(result => result.kind === 'action' && result.payload.call_event_id === event.event_id)).length, reason: 'Paired tool observations contain hashes only. Without contemporaneous before/after file snapshots and evidence linkage, real-log calls cannot establish no-gain loops.' },
+    diagnostics: [...state.diagnostics, ...(options.rules?.handoffPercent === undefined ? [] : [{ code: 'deprecated_handoff_percent', message: '--handoff-percent is accepted for compatibility but has no handoff-triggering effect' }])],
     limitations: [
       'Fixture-tested partial adapters; no promise of compatibility with every Codex version or live TUI.',
       'Last-request token/window ratio is an estimate of the last observed request, not verified current occupancy.',
