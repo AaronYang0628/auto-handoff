@@ -6,6 +6,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import vm from 'node:vm';
+import { createHash } from 'node:crypto';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const website = path.join(root, 'website');
@@ -13,7 +14,7 @@ const html = fs.readFileSync(path.join(website, 'index.html'), 'utf8');
 const script = fs.readFileSync(path.join(website, 'script.js'), 'utf8');
 const css = fs.readFileSync(path.join(website, 'styles.css'), 'utf8');
 const publicAssets = ['.nojekyll', 'favicon.svg', 'index.html', 'script.js', 'styles.css'];
-const build = (output: string) => spawnSync(process.execPath, ['scripts/build-site.mjs', '--out-dir', output], { cwd: root, encoding: 'utf8' });
+const build = (output: string, cwd = root) => spawnSync(process.execPath, ['scripts/build-site.mjs', '--out-dir', output], { cwd, encoding: 'utf8' });
 
 function temporary(t: any) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-handoff-site-'));
@@ -25,15 +26,40 @@ test('Pages build contains only public assets, repeats safely, and supports a pr
   const output = path.join(temporary(t), 'output');
   assert.equal(build(output).status, 0);
   assert.deepEqual(fs.readdirSync(output).sort(), publicAssets);
-  for (const file of publicAssets.filter(file => file !== '.nojekyll')) {
+  for (const file of publicAssets.filter(file => !['.nojekyll', 'index.html'].includes(file))) {
     assert.equal(fs.readFileSync(path.join(output, file), 'utf8'), fs.readFileSync(path.join(website, file), 'utf8'));
   }
+  const builtHtml = fs.readFileSync(path.join(output, 'index.html'), 'utf8');
+  assert.equal(builtHtml.replace(/\?v=[0-9a-f]{16}/g, ''), html);
+  for (const asset of ['styles.css', 'script.js']) {
+    const hash = createHash('sha256').update(fs.readFileSync(path.join(output, asset))).digest('hex').slice(0, 16);
+    assert(builtHtml.includes(`"./${asset}?v=${hash}"`));
+    assert(!builtHtml.includes(`"./${asset}"`));
+  }
   assert.equal(build(output).status, 0);
-  for (const [, reference] of html.matchAll(/(?:href|src)="(\.\/[^"#]+)"/g)) {
+  assert.equal(fs.readFileSync(path.join(output, 'index.html'), 'utf8'), builtHtml);
+  for (const [, reference] of builtHtml.matchAll(/(?:href|src)="(\.\/[^"#]+)"/g)) {
     const resolved = new URL(reference, 'https://example.github.io/auto-handoff/');
     assert(resolved.pathname.startsWith('/auto-handoff/'));
-    assert(fs.existsSync(path.join(output, reference)));
+    assert(fs.existsSync(path.join(output, reference.split('?')[0])));
   }
+  // Change isolated copies, never the real source, to prove content changes bust caches.
+  const isolated = path.join(temporary(t), 'repo');
+  fs.mkdirSync(path.join(isolated, 'scripts'), { recursive: true });
+  fs.cpSync(website, path.join(isolated, 'website'), { recursive: true });
+  fs.copyFileSync(path.join(root, 'scripts/build-site.mjs'), path.join(isolated, 'scripts/build-site.mjs'));
+  const changedOutput = path.join(isolated, 'site-dist');
+  const assetUrl = (document: string, asset: string) => document.match(new RegExp(`\\./${asset.replace('.', '\\.')}\\?v=[0-9a-f]{16}`))![0];
+  fs.appendFileSync(path.join(isolated, 'website/styles.css'), '\n/* Changed stylesheet */\n');
+  assert.equal(build(changedOutput, isolated).status, 0);
+  const changedCss = fs.readFileSync(path.join(changedOutput, 'index.html'), 'utf8');
+  assert.notEqual(assetUrl(changedCss, 'styles.css'), assetUrl(builtHtml, 'styles.css'));
+  assert.equal(assetUrl(changedCss, 'script.js'), assetUrl(builtHtml, 'script.js'));
+  fs.appendFileSync(path.join(isolated, 'website/script.js'), '\n// Changed script\n');
+  assert.equal(build(changedOutput, isolated).status, 0);
+  const changedJs = fs.readFileSync(path.join(changedOutput, 'index.html'), 'utf8');
+  assert.notEqual(assetUrl(changedJs, 'script.js'), assetUrl(changedCss, 'script.js'));
+  assert.equal(assetUrl(changedJs, 'styles.css'), assetUrl(changedCss, 'styles.css'));
 });
 
 test('Pages build refuses repository/source outputs and unexpected output files', t => {

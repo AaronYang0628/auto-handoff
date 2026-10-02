@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // A deliberately small, dependency-free GitHub Pages build. Only public website
 // assets are copied; repository files and runtime handoff state are never bundled.
-import { copyFile, mkdir, writeFile, readdir, lstat } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile, readdir, lstat } from 'node:fs/promises';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -25,8 +26,16 @@ for (const entry of await readdir(output)) {
     throw new Error(`Unexpected entry in website output: ${entry}. Choose a clean output directory.`);
   }
 }
-for (const asset of assets) {
+for (const asset of assets.filter(asset => asset !== 'index.html')) {
   await copyFile(path.join(source, asset), path.join(output, asset));
 }
+// A fresh HTML document must request matching assets even in a returning browser.
+// Version the relative URLs by their bytes; unchanged assets keep stable URLs.
+let html = await readFile(path.join(source, 'index.html'), 'utf8');
+for (const asset of ['styles.css', 'script.js']) {
+  const hash = createHash('sha256').update(await readFile(path.join(output, asset))).digest('hex').slice(0, 16);
+  html = html.replaceAll(`"./${asset}"`, `"./${asset}?v=${hash}"`);
+}
+await writeFile(path.join(output, 'index.html'), html);
 await writeFile(path.join(output, '.nojekyll'), '');
 console.log(`Built GitHub Pages website: ${output}`);
