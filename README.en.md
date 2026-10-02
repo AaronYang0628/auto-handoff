@@ -12,7 +12,19 @@ Current task → checkpoint → read-only initialization → resume the exact ne
 
 Your old session and uncommitted changes stay in place. You choose when to hand off, which profile to use, and when to resume development.
 
-> **Status: early version, focused on Codex CLI.** Verification snapshot, 2026-10-02: all 67 automated tests passed on Linux with Node.js 22.18.0 and 24.19.0. The command-help interfaces of Codex CLI 0.159.2 were checked. Authenticated session creation, model initialization, and interactive resume have not been verified end to end. macOS, native Windows, and WSL are also unverified. See [compatibility](docs/compatibility.md) and the [verification record](docs/verification.md) (Chinese).
+> **Status: early version, focused on Codex CLI.** Verification snapshot, 2026-10-02: 67 core tests and 9 website tests passed (76 total) on Linux with Node.js 22.18.0 and 24.19.0. The command-help interfaces of Codex CLI 0.159.2 were checked. Authenticated session creation, model initialization, and interactive resume have not been verified end to end. macOS, native Windows, and WSL are also unverified. See [compatibility](docs/compatibility.md) and the [verification record](docs/verification.md) (Chinese).
+
+## Let your Codex install it
+
+**Copy this message into Codex to have it install the CLI and skill following the README:**
+
+```text
+Install the CLI and user-level skill from https://github.com/AaronYang0628/auto-handoff. Follow the README to check my Node.js version, complete installation, and run csm doctor. Do not change my profile or model configuration, and do not run a real handoff yet.
+```
+
+**No service needs to be started.** auto-handoff is an on-demand local CLI and Codex skill. It needs no Docker, listening ports, or background daemon. Installation does not start monitoring or perform a handoff. A real handoff is a separate action you request, using your chosen Codex model service.
+
+Optional `csm watch` starts only when you explicitly run it: `--once` checks once and exits; without that flag it polls in the current terminal until Ctrl+C. Ordinary checkpoint / handoff does not depend on watch.
 
 ## Install once
 

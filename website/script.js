@@ -32,19 +32,22 @@ function announce(message) {
 for (const button of document.querySelectorAll('[data-copy]')) {
   button.hidden = false;
   button.addEventListener('click', async () => {
-    const code = document.getElementById(button.dataset.copy);
+    const target = language === 'zh' && button.dataset.copyZh ? button.dataset.copyZh : button.dataset.copy;
+    const code = document.getElementById(target);
     if (!code) return;
     try {
       if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
       await navigator.clipboard.writeText(code.textContent);
-      announce(language === 'zh' ? '命令已复制' : 'Command copied');
+      announce(button.dataset.copyKind === 'prompt'
+        ? (language === 'zh' ? '安装提示词已复制，粘贴到 Codex 即可' : 'Installation prompt copied. Paste it into Codex.')
+        : (language === 'zh' ? '命令已复制' : 'Command copied'));
     } catch {
       const range = document.createRange();
       range.selectNodeContents(code);
       const selection = window.getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
-      announce(language === 'zh' ? '无法访问剪贴板。命令已选中，请手动复制。' : 'Clipboard unavailable. Command selected; copy it manually.');
+      announce(language === 'zh' ? '无法访问剪贴板。文本已选中，请手动复制。' : 'Clipboard unavailable. Text selected; copy it manually.');
     }
   });
 }

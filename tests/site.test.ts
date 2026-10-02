@@ -87,6 +87,12 @@ test('static page keeps runtime private and essential content usable without Jav
   for (const text of ['npm ci', 'npm link', 'csm install --scope user', 'csm doctor', '$auto-handoff', 'YOUR_PROFILE', 'read-only', 'unknown', 'estimated', 'stale', 'remains unverified', 'have not been tested', 'may incur usage']) assert(html.includes(text), text);
   assert.match(html, /Illustrative flow/);
   assert(!html.includes('npm install -g auto-handoff'), 'No unpublished registry installation instructions.');
+  for (const text of ['Let your Codex install it.', '让你的 Codex 帮你安装。', 'No service to start.', '无需启动服务。', 'No Docker, listening ports, or background daemon.', '只有你主动运行才会开始']) assert(html.includes(text), text);
+  assert(html.indexOf('id="install-prompt-title"') < html.indexOf('id="workflow"'), 'Installation prompt belongs in the hero.');
+  const chinesePrompt = /<code id="codex-install-zh"[^>]*>([^<]+)<\/code>/.exec(html)![1];
+  const englishPrompt = /<code id="codex-install-en"[^>]*>([^<]+)<\/code>/.exec(html)![1];
+  assert(fs.readFileSync(path.join(root, 'README.md'), 'utf8').includes(chinesePrompt));
+  assert(fs.readFileSync(path.join(root, 'README.en.md'), 'utf8').includes(englishPrompt));
 });
 
 function browserHarness(options: { language?: string; storageBlocked?: boolean; clipboardUnavailable?: boolean; clipboardReject?: boolean } = {}) {
@@ -107,8 +113,13 @@ function browserHarness(options: { language?: string; storageBlocked?: boolean; 
   status.classList = { add(name: string) { status.classes.add(name); }, remove(name: string) { status.classes.delete(name); } };
   const nav = element();
   const visual = element();
-  const code = new Map([...html.matchAll(/<code id="([^"]+)">([\s\S]*?)<\/code>/g)].map(match => [match[1], element(match[2])]));
-  const buttons = [...code.keys()].map(id => { const button = element(); button.dataset.copy = id; return button; });
+  const code = new Map([...html.matchAll(/<code id="([^"]+)"[^>]*>([\s\S]*?)<\/code>/g)].map(match => [match[1], element(match[2])]));
+  const buttons = [...html.matchAll(/<button[^>]*data-copy="([^"]+)"([^>]*)>/g)].map(match => {
+    const button = element(); button.dataset.copy = match[1];
+    button.dataset.copyZh = /data-copy-zh="([^"]+)"/.exec(match[2])?.[1] || '';
+    button.dataset.copyKind = /data-copy-kind="([^"]+)"/.exec(match[2])?.[1] || '';
+    return button;
+  });
   const documentElement = { dataset: {} as Record<string, string>, lang: '' };
   const document = {
     documentElement,
@@ -149,7 +160,7 @@ test('language and command controls work when browser storage is blocked', async
   const page = browserHarness({ storageBlocked: true });
   page.languageButton.listeners.click();
   assert.equal(page.documentElement.lang, 'zh-Hans');
-  await page.buttons[0].listeners.click();
+  await page.buttons.find(button => button.dataset.copy === 'install-code')!.listeners.click();
   assert.equal(page.copied.length, 1);
   assert.equal(page.status.textContent, '命令已复制');
 });
@@ -160,27 +171,37 @@ test('copy buttons copy exact commands and announce success, including repeated 
     assert.equal(button.hidden, false);
     await button.listeners.click();
   }
-  assert.equal(page.copied[0], 'git clone https://github.com/AaronYang0628/auto-handoff.git\ncd auto-handoff\nnpm ci\nnpm link\ncsm install --scope user\ncsm doctor');
-  assert.equal(page.copied[1], '$auto-handoff Hand off this task using profile=YOUR_PROFILE');
-  await page.buttons[0].listeners.click();
-  assert.equal(page.copied.length, 3);
+  assert.equal(page.copied[1], 'git clone https://github.com/AaronYang0628/auto-handoff.git\ncd auto-handoff\nnpm ci\nnpm link\ncsm install --scope user\ncsm doctor');
+  assert.equal(page.copied[2], '$auto-handoff Hand off this task using profile=YOUR_PROFILE');
+  await page.buttons.find(button => button.dataset.copy === 'install-code')!.listeners.click();
+  assert.equal(page.copied.length, 4);
   assert.equal(page.status.textContent, 'Command copied');
   assert.equal(page.timers.size, 1, 'Repeated clicks reset the announcement timer.');
   assert(page.status.classes.has('visible'));
   for (const callback of page.timers.values()) callback();
   assert.equal(page.status.textContent, '');
   assert(!page.status.classes.has('visible'));
+  const promptButton = page.buttons.find(button => button.dataset.copy === 'codex-install-en')!;
+  page.languageButton.listeners.click();
+  await promptButton.listeners.click();
+  assert.equal(page.copied.at(-1), '请从 https://github.com/AaronYang0628/auto-handoff 安装 CLI 和用户级技能，按照 README 检查 Node.js 版本并完成安装，运行 csm doctor；不要改我的 profile 或模型配置，也先不要执行真实交接。');
+  assert.match(page.status.textContent, /安装提示词已复制/);
+  page.languageButton.listeners.click();
+  await promptButton.listeners.click();
+  assert.equal(page.copied.at(-1), 'Install the CLI and user-level skill from https://github.com/AaronYang0628/auto-handoff. Follow the README to check my Node.js version, complete installation, and run csm doctor. Do not change my profile or model configuration, and do not run a real handoff yet.');
+  assert.match(page.status.textContent, /Installation prompt copied/);
 });
 
 test('unavailable or rejected clipboard selects the command and gives manual-copy instructions', async () => {
   for (const options of [{ clipboardUnavailable: true }, { clipboardReject: true }]) {
     const page = browserHarness(options);
-    await page.buttons[1].listeners.click();
+    await page.buttons.find(button => button.dataset.copy === 'skill-code')!.listeners.click();
     assert.equal(page.copied.length, 0);
     assert.deepEqual(page.selected, ['$auto-handoff Hand off this task using profile=YOUR_PROFILE']);
     assert.match(page.status.textContent, /copy it manually/);
     page.languageButton.listeners.click();
-    await page.buttons[0].listeners.click();
+    await page.buttons.find(button => button.dataset.copy === 'codex-install-en')!.listeners.click();
+    assert.match(page.selected[1], /请从 https:\/\/github.com\/AaronYang0628\/auto-handoff 安装 CLI/);
     assert.match(page.status.textContent, /请手动复制/);
   }
 });

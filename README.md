@@ -12,7 +12,19 @@
 
 旧会话和未提交改动保留。你决定何时交接、用哪个 profile，以及何时继续写代码。
 
-> **当前状态：早期版本，面向 Codex CLI。** 2026-10-02 验证：Linux 上 Node.js 22.18.0 / 24.19.0 的 67 项自动化测试通过；Codex CLI 0.159.2 的命令帮助接口已核对。真实账号的创建、模型初始化和交互恢复尚未完成端到端验证；macOS、Windows 原生和 WSL 也未验证。详见[兼容性](docs/compatibility.md)和[验证记录](docs/verification.md)。
+> **当前状态：早期版本，面向 Codex CLI。** 2026-10-02 验证：Linux 上 Node.js 22.18.0 / 24.19.0 的 67 项核心测试及 9 项页面测试通过（共 76 项）；Codex CLI 0.159.2 的命令帮助接口已核对。真实账号的创建、模型初始化和交互恢复尚未完成端到端验证；macOS、Windows 原生和 WSL 也未验证。详见[兼容性](docs/compatibility.md)和[验证记录](docs/verification.md)。
+
+## 让你的 Codex 帮你安装
+
+**把下面这句话复制到 Codex，让它按 README 安装 CLI 和技能：**
+
+```text
+请从 https://github.com/AaronYang0628/auto-handoff 安装 CLI 和用户级技能，按照 README 检查 Node.js 版本并完成安装，运行 csm doctor；不要改我的 profile 或模型配置，也先不要执行真实交接。
+```
+
+**不需要启动服务。** auto-handoff 是按需运行的本地 CLI 和 Codex 技能，不需要 Docker、监听端口或后台守护进程。安装不会自动开始监测或执行交接；真实交接由你另外发起，并会使用所选 Codex 模型服务。
+
+可选的 `csm watch` 只有在你主动运行时才开始：带 `--once` 检查一次后退出，不带则在当前终端持续轮询，按 Ctrl+C 停止。普通 checkpoint / handoff 不依赖 watch。
 
 ## 安装一次
 
